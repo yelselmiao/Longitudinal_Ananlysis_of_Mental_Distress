@@ -1,0 +1,647 @@
+---
+title: "STAY550-FINAL-PROJECT"
+output: html_notebook
+author: Shuyi Tan
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r Library,message = FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(nlme)
+library(wgeesel)
+library(gee)
+library(mice)
+library(lme4)
+```
+
+```{r Load Table}
+data <- read.table("/Users/shuyitan/Desktop/Winter_Term_2/STAT550-FINAL/Data/data_dep.txt",sep = ' ')
+
+# Select Variables
+data <- data %>% dplyr::select(SN,NEW_GRP,month,DDS1,DDS4,GSI) %>%
+          dplyr::rename(study_group = 'NEW_GRP',
+                        gender = 'DDS1',
+                        education = 'DDS4'
+                        )
+
+# Adjust variable type
+data <- data %>% mutate(SN = as.factor(SN),
+                study_group = as.factor(study_group),
+                month = as.factor(month),
+                gender = as.factor(gender))
+
+str(data)
+```
+
+
+```{r Data Imputation,message=FALSE}
+data_imp <- mice::mice(data,m=5,maxit=50,meth='pmm',seed=500)
+data_imputed <- complete(data_imp,1)
+
+
+data_treat_imp <- data_imputed %>% filter(study_group == '1' )
+data_cont_imp <- data_imputed %>% filter(study_group == '2' )
+
+data_treat_imp <-  data_treat_imp %>%
+                      mutate(SN = as.character(SN),
+                             month = as.numeric(as.character(month)))
+
+data_cont_imp <-  data_cont_imp %>%
+                      mutate(SN = as.character(SN),
+                             month = as.numeric(as.character(month)))
+
+
+data_imputed <-  data_imputed %>%
+                      mutate(SN = as.character(SN),
+                             month = as.numeric(as.character(month)))
+
+```
+
+
+# Exploratory Data Analysis
+
+```{r}
+data %>%
+  ggplot(aes(x=GSI)) +
+  geom_histogram()
+
+data %>% arrange(GSI,desc = TRUE)
+```
+
+
+```{r Distribution of Categorical Variable}
+# Gender
+# 1  Male; 2  Female           
+  
+data_male <-  data %>% filter(gender == '1' )
+length(unique(data_male$SN))
+
+data_female <-  data %>% filter(gender == '2' )
+length(unique(data_female$SN))
+
+#  Study Group
+data_treatment <- data %>% filter(study_group == '1' )
+length(unique(data_treatment$SN))
+
+
+data_control <- data %>% filter(study_group == '2' )
+length(unique(data_control$SN))
+
+
+# Education 
+data %>% ggplot(aes(x=education)) + 
+  geom_bar() + 
+  scale_x_binned() + 
+  labs(x = 'Education (in years)')
+```
+
+```{r missing rate at each time point}
+data %>% group_by(month) %>%
+  summarize(mis_count = sum(is.na(GSI))) %>% left_join(data %>% group_by(month) %>%
+  tally(), by = 'month') %>%
+  mutate(mis_prop = scales::percent(mis_count/n))
+
+```
+
+```{r}
+# Remove record whose GSI is missing at all timep points or 4 time points
+data_wide <- data %>% group_by(SN) %>%
+  dplyr::select(SN,month,GSI) %>%
+   pivot_wider(names_from = month, values_from = GSI) 
+
+data_wide$NA_count <- rowSums(is.na(data_wide[,2:6]))
+
+
+data <- data_wide %>% filter(NA_count < 4) %>% 
+  dplyr::select(SN) %>% 
+  inner_join(data, by = "SN")
+
+```
+
+
+```{r drop out time plotting}
+data %>% group_by(month) %>% 
+  ggplot(aes(x = GSI))  + 
+  geom_histogram() +
+  facet_wrap(~month)
+
+
+data <- data %>% mutate(missing = ifelse(is.na(GSI), TRUE,FALSE))
+
+chisq.test(data$missing,data$gender)
+fisher.test(data$missing,data$gender)
+
+
+data %>% group_by(missing) %>% 
+  ggplot(aes(x = education))  + 
+  geom_histogram() +
+  facet_wrap(~missing)
+
+chisq.test(data$missing,data$education)
+fisher.test(data$missing,data$education,'simulate.p.value=TRUE')
+
+```
+
+```{r}
+pd <- position_dodge(0.1) 
+
+
+data_control %>% group_by(SN) %>%
+  mutate(month = as.character(month),month = as.numeric(month)) %>%
+  filter(is.na(GSI) == FALSE) %>%
+  summarize(drop_out = max(month)) %>%
+  right_join(data_control, by = 'SN') %>%
+  mutate(month = as.factor(month),drop_out = as.factor(drop_out)) %>%
+  group_by(drop_out,month) %>%
+  filter(drop_out != '0') %>%
+  summarize(mean_score = mean(GSI, na.rm = TRUE), sd_score = sd(GSI, na.rm = TRUE)) %>%
+  filter(is.nan(mean_score) != TRUE) %>%
+  ggplot(aes(x = month, y = mean_score, group=drop_out, color = drop_out)) +
+  geom_point(position=pd) + 
+  geom_line(position=pd) + 
+  labs(y = 'Mean of GSI', x= 'Month') + 
+  ggtitle('Control Group')
+  #geom_errorbar(aes(ymin=mean_score-sd_score, ymax=mean_score+sd_score), width=.1,position=pd)
+
+
+data_treatment %>% group_by(SN) %>%
+  mutate(month = as.character(month),month = as.numeric(month)) %>%
+  filter(is.na(GSI) == FALSE) %>%
+  summarize(drop_out = max(month)) %>%
+  right_join(data_treatment, by = 'SN') %>%
+  mutate(month = as.factor(month),drop_out = as.factor(drop_out)) %>%
+  group_by(drop_out,month) %>%
+  filter(drop_out != '0') %>%
+  summarize(mean_score = mean(GSI, na.rm = TRUE), sd_score = sd(GSI, na.rm = TRUE)) %>%
+  filter(is.nan(mean_score) != TRUE) %>%
+  ggplot(aes(x = month, y = mean_score, group=drop_out, color = drop_out)) +
+  geom_point(position=pd) + 
+  geom_line(position=pd) + 
+  labs(y = 'Mean of GSI',x = 'Month') + 
+  ggtitle('Intervention Group')
+
+
+
+data %>% group_by(SN) %>%
+  mutate(month = as.character(month),month = as.numeric(month)) %>%
+  filter(is.na(GSI) == FALSE) %>%
+  summarize(drop_out = max(month)) %>%
+  right_join(data, by = 'SN') %>%
+  mutate(month = as.factor(month),drop_out = as.factor(drop_out)) %>%
+  group_by(drop_out,month) %>%
+  filter(drop_out != '0') %>%
+  summarize(mean_score = mean(GSI, na.rm = TRUE), sd_score = sd(GSI, na.rm = TRUE)) %>%
+  filter(is.nan(mean_score) != TRUE) %>%
+  ggplot(aes(x = month, y = mean_score, group=drop_out, color = drop_out)) +
+  geom_point(position=pd) + 
+  geom_line(position=pd) + 
+  labs(y = 'Mean of GSI', x= 'Month') 
+  
+```
+
+```{r all subjects box plot}
+data %>% group_by(month) %>%
+  ggplot(aes (x = month, y = GSI)) + 
+  geom_boxplot() +
+  labs(x = 'Month')
+
+```
+
+
+
+
+```{r randomly-selected 20 subjects}
+data %>%
+  filter(SN %in% sample(data$SN,20)) %>%
+  ggplot(aes(x = month, y = GSI, group = SN)) +
+  geom_point() +
+  geom_line() + 
+  labs(x = 'Month')
+```
+
+
+## Treatment group
+
+```{r}
+# Treatment group
+p1 <- data_treatment %>% ggplot(aes(x = month, y = GSI, group = SN)) +
+  geom_point() +
+  geom_line()
+```
+
+
+
+```{r treatment box plot}
+data_treatment %>% #group_by(month) %>%
+  ggplot(aes(x = month, y= GSI)) +
+  geom_boxplot()
+```
+
+```{r}
+data_treatment %>% 
+  group_by(month) %>%
+  summarize(mean = mean(GSI, na.rm = TRUE),
+            SD = sd(GSI, na.rm = TRUE))
+```
+
+
+```{r two-sample t-test in intervention group}
+t.test(data_0_treat$GSI,data_3_treat$GSI)
+t.test(data_3_treat$GSI,data_6_treat$GSI)
+t.test(data_6_treat$GSI,data_18_treat$GSI)
+t.test(data_18_treat$GSI,data_60_treat$GSI)
+
+
+
+wilcox.test(data_0_treat$GSI,data_3_treat$GSI)
+wilcox.test(data_3_treat$GSI,data_6_treat$GSI)
+wilcox.test(data_6_treat$GSI,data_18_treat$GSI)
+wilcox.test(data_18_treat$GSI,data_60_treat$GSI)
+
+```
+
+```{r}
+t.test(data_0_cont$GSI,data_3_cont$GSI)
+t.test(data_3_cont$GSI,data_6_cont$GSI)
+t.test(data_6_cont$GSI,data_18_cont$GSI)
+t.test(data_18_cont$GSI,data_60_cont$GSI)
+
+
+
+wilcox.test(data_0_cont$GSI,data_3_cont$GSI)
+wilcox.test(data_3_cont$GSI,data_6_cont$GSI)
+wilcox.test(data_6_cont$GSI,data_18_cont$GSI)
+wilcox.test(data_18_cont$GSI,data_60_cont$GSI)
+```
+
+
+
+## Control Group
+
+
+```{r control box plot}
+data_control %>% #group_by(month) %>%
+  ggplot(aes(x = month, y= GSI)) +
+  geom_boxplot()
+```
+
+
+## Treatment and Control group
+
+```{r Group means over time}
+# Group means over time
+data %>% group_by(study_group, month) %>%
+  summarize(mean_GSI = mean(GSI,na.rm = TRUE)) %>%
+  ggplot(aes(x = month, y = mean_GSI, group = study_group, color = study_group)) +
+  geom_point() + 
+  geom_line()
+
+```
+
+```{r cross sectional features at selected time, fig.width=4, fig.height=1.5}
+
+
+data %>% group_by(month) %>%
+  ggplot(aes(x=study_group, y=GSI, fill = study_group)) + 
+  geom_boxplot() + 
+  facet_wrap(~month, ncol = 5) + 
+  labs(x = "Month") + 
+  labs(fill = "Study Group") + 
+  scale_fill_discrete(labels = c("1:Intervention", "2: Control")) + 
+  ggtitle('Cross Sectional Effect of the Intervention')
+```
+
+
+
+```{r Deal with outliers, fig.width=4, fig.height=1.5}
+Q <- quantile(data$GSI, probs=c(.25, .75), na.rm = TRUE)
+iqr <- IQR(data$GSI, na.rm = TRUE)
+up <-  Q[2]+1.5*iqr # Upper Range  
+low<- Q[1]-1.5*iqr # Lower Range
+
+data_eliminated<- subset(data, data$GSI > (Q[1] - 1.5*iqr) & data$GSI < (Q[2]+1.5*iqr))
+
+
+data_eliminated %>% group_by(month) %>%
+  filter(month != '0') %>%
+  ggplot(aes(x=study_group, y=GSI, fill = study_group)) + 
+  geom_boxplot() + 
+  facet_wrap(~month, ncol = 5) + 
+  labs(x = "Month") + 
+  labs(fill = "Study Group") + 
+  scale_fill_discrete(labels = c("1:Intervention", "2: Control")) + 
+  ggtitle('Cross Sectional Effect of the Intervention')
+
+data <- data_eliminated
+```
+
+```{r descriptive table}
+data_eliminated %>% 
+  filter(month != '0') %>% 
+  group_by(study_group,month) %>%
+  summarize(mean = mean(GSI, na.rm = TRUE), sd = sd(GSI,na.rm = TRUE))
+```
+
+
+To confirm the effects of removal of device, two sample t-tests and Wilcoxon tests were conducted for each period. By checking the normality of the scores in each level, it appears that the data are likely to be normally distributed after removing extreme values/ outliers. Additionally, variance was checked to be fairly constant in each period.
+
+```{r check normality}
+
+data <- data_eliminated
+
+
+data_0_treat <- data %>% filter(month == '0', study_group == '1')
+data_0_cont <- data %>% filter(month == '0', study_group == '2')
+
+data_3_treat <- data %>% filter(month == '3', study_group == '1')
+data_3_cont <- data %>% filter(month == '3', study_group == '2')
+
+data_6_treat <- data %>% filter(month == '6', study_group == '1')
+data_6_cont <- data %>% filter(month == '6', study_group == '2')
+
+
+data_18_treat <- data %>% filter(month == '18', study_group == '1')
+data_18_cont <- data %>% filter(month == '18', study_group == '2')
+
+
+data_60_treat <- data %>% filter(month == '60', study_group == '1')
+data_60_cont <- data %>% filter(month == '60', study_group == '2')
+
+
+# check normality 
+shapiro.test(data_0_treat$GSI)
+shapiro.test(data_0_cont$GSI)
+
+
+shapiro.test(data_3_treat$GSI)
+shapiro.test(data_3_cont$GSI)
+
+
+shapiro.test(data_6_treat$GSI)
+shapiro.test(data_6_cont$GSI)
+
+
+shapiro.test(data_18_treat$GSI)
+shapiro.test(data_18_cont$GSI)
+
+shapiro.test(data_60_treat$GSI)
+shapiro.test(data_60_cont$GSI)
+
+# Normality all satisfied! 
+
+```
+
+
+```{r check variance}
+
+data_3 <- data %>% filter(month == '3')
+data_6 <- data %>% filter(month == '6')
+data_18 <- data %>% filter(month == '18')
+data_60 <- data %>% filter(month == '60')
+
+
+var.test(GSI ~ study_group, data = data_3)
+
+var.test(GSI ~ study_group, data = data_6)
+
+var.test(GSI ~ study_group, data = data_18)
+
+var.test(GSI ~ study_group, data = data_60)
+
+```
+
+
+
+
+
+
+```{r two sample t test}
+
+t.test(data_3_treat$GSI,data_3_cont$GSI)
+
+t.test(data_6_treat$GSI,data_6_cont$GSI)
+
+t.test(data_18_treat$GSI,data_18_cont$GSI)
+
+t.test(data_60_treat$GSI,data_60_cont$GSI)
+
+```
+
+```{r Wilcoxon test}
+wilcox.test(data_3_treat$GSI,data_3_cont$GSI)
+wilcox.test(data_6_treat$GSI,data_6_cont$GSI)
+wilcox.test(data_18_treat$GSI,data_18_cont$GSI)
+wilcox.test(data_60_treat$GSI,data_60_cont$GSI)
+```
+
+```{r Overall t test and Wilcoxon test}
+t.test(data_treatment$GSI, data_control$GSI)
+wilcox.test(data_treatment$GSI, data_control$GSI)
+```
+
+
+
+# Confirmative Analysis
+
+## Treatment group
+```{r determine random effect}
+data_treatment <- data_treatment %>% mutate(SN = as.character(SN),
+                          SN = as.numeric(SN),
+                          month = as.character(month),
+                          month = as.numeric(month)
+                          )
+
+data_treatment_lme <- groupedData(GSI ~ month|SN,data = data_treatment)
+attach(data_treatment_lme)
+
+plot(data_treatment_lme[1:100,])
+
+fit_lm <- lmList(GSI~month|SN,data_treatment_lme,na.action=na.omit)
+plot(intervals(fit_lm),axes=FALSE)
+```
+
+```{r compare random effect}
+fit_ran_intercept <- lme(GSI~month,random = ~1|SN, data=data_treatment_lme)
+
+fit_ran_both <- lme(GSI~month,random = ~month|SN, data=data_treatment_lme)
+
+anova(fit_ran_intercept,fit_ran_both)
+```
+
+```{r check assumption of random-both-model }
+# Q-Q plot for the random effects
+qqnorm(fit_ran_both, ~ranef(.))
+
+# QQ plot for residual
+qqnorm(fit_ran_both, ~ resid(., type = "p"))
+
+
+# Variance
+plot(fit_ran_both)
+#  It also shows relatively constant variance across the fitted range. The slight reduction in apparent variance on the right and left of the graph are likely a result of there being fewer observation in these predicted areas.
+```
+
+```{r Weighted GEE model, message=FALSE}
+#wgee(model, data, id, family, corstr, scale = NULL, mismodel = NULL, maxit=200, tol=0.001)
+fit_wgee_treat <- wgee(GSI~month, data=data_treatment, id=data_treatment$SN,family="gaussian",
+            corstr="exchangeable",scale=NULL)
+summary(fit_wgee_treat)
+```
+
+```{r imputed GEE model}
+
+gee_treat <- gee(GSI~month,data = data_treat_imp,id = data_treat_imp$SN,corstr="exchangeable")
+
+summary(gee_treat)  
+```
+
+## Control Group
+
+```{r determine random effect}
+data_control <- data_control %>% mutate(SN = as.character(SN),
+                          SN = as.numeric(SN),
+                          month = as.character(month),
+                          month = as.numeric(month)
+                          )
+
+data_cont_lme <- groupedData(GSI ~ month|SN,data = data_control)
+attach(data_cont_lme)
+
+
+fit_lm_cont <- lmList(GSI~month|SN,data_cont_lme,na.action=na.omit)
+plot(intervals(fit_lm_cont),axes=FALSE)
+
+```
+
+```{r compare random effect}
+fit_ran_intercept_cont <- lme(GSI~month,random = ~1|SN, data=data_cont_lme)
+fit_ran_both_cont <- lme(GSI~month,random = ~month|SN, data=data_cont_lme)
+anova(fit_ran_intercept_cont,fit_ran_both_cont)
+```
+
+```{r check assumption of random-intercept-model }
+# Q-Q plot for the random effects
+qqnorm(fit_ran_intercept_cont, ~ranef(.))
+
+# QQ plot for residual
+qqnorm(fit_ran_intercept_cont, ~ resid(., type = "p"))
+
+# Variance
+plot(fit_ran_intercept_cont)
+```
+
+```{r summary of LEM (Control)}
+summary(fit_ran_intercept_cont)
+```
+
+
+
+```{r Weighted GEE model, message=FALSE}
+#wgee(model, data, id, family, corstr, scale = NULL, mismodel = NULL, maxit=200, tol=0.001)
+fit_wgee_cont <- wgee(GSI~month, data=data_control, id=data_control$SN,family="gaussian",
+            corstr="exchangeable",scale=NULL)
+summary(fit_wgee_cont)
+```
+
+```{r imputed GEE model}
+gee_cont <- gee(GSI~month,data = data_cont_imp,id = data_cont_imp$SN,corstr="exchangeable")
+
+summary(gee_cont)  
+
+
+pvalue_intecept  <- 2*min(pnorm(15.671587), 1-pnorm(15.671587))  
+pvalue_month  <- 2*min(pnorm(-2.660117), 1-pnorm(-2.660117))  
+pvalue_intecept
+pvalue_month
+```
+
+
+# Overall, treatemnt acts as predictor
+
+```{r Determine Random Effect}
+
+data_all <- data %>%
+  mutate(month = as.numeric(as.character(month)))#,
+         #treatment = ifelse(study_group == '1', '1','0'),
+        # treatment = as.factor(treatment))
+
+
+lmm <- lmer(GSI ~ study_group + month + gender + education  + (1 | SN), data = data_all,
+    REML = FALSE)
+
+
+lmm_both <- lmer(GSI ~ study_group + month + gender + education  + (month | SN), data = data_all,
+    REML = FALSE)
+
+anova(lmm,lmm_both)
+
+summary(lmm)
+```
+
+```{r}
+lmm_test <- lme(GSI ~ study_group + month + gender + education,random=~1|SN,data=data_all)
+summary(lmm_test)
+```
+
+```{r check assumption of random-intercept-model }
+# Q-Q plot for the random effects
+qqnorm(lmm_test, ~ranef(.))
+
+# QQ plot for residual
+qqnorm(lmm_test, ~ resid(., type = "p"))
+
+# Variance
+plot(lmm_test)
+```
+
+
+
+```{r Weighted Gee}
+data_all$gender <- data_imputed$gender
+data_all$education <- data_imputed$education
+#data_all <- as.data.frame(data_all)
+
+fit <- wgee(GSI ~ study_group+month+gender + education, data=data_all, id=data_all$SN, family="gaussian",
+            corstr="exchangeable", scale=NULL)
+
+summary(fit)
+```
+
+```{r Imputed GEE model}
+data_imputed$study_group <- relevel(data_imputed$study_group,ref = '2')
+
+gee_all <- gee(GSI~study_group + month + gender + education,data = data_imputed,id = data_imputed$SN,corstr="exchangeable")
+summary(gee_all)
+```
+
+
+```{r Calculate p-value for GEE}
+# Intercept
+2*min(pnorm(7.2505246), 1-pnorm(7.2505246))  
+# study_group1
+2*min(pnorm(0.9361824), 1-pnorm(0.9361824))  
+# month
+2*min(pnorm(-6.3076754), 1-pnorm(-6.3076754))  
+
+# gender2
+2*min(pnorm(4.0806887), 1-pnorm(4.0806887))  
+
+# education
+2*min(pnorm(-3.9239191), 1-pnorm(-3.9239191))  
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
